@@ -24,15 +24,15 @@ aria2.set_global_options(options)
 
 
 async def download_video(url, reply_msg, user_mention, user_id):
-    response = requests.get(f"https://teraboxvideodownloader.nepcoderdevs.workers.dev/?url={url}")
+    response = requests.get(f"https://teraboxdl.tellycloudapi.workers.dev/?url={url}")
     response.raise_for_status()
     data = response.json()
 
-    resolutions = data["response"][0]["resolutions"]
-    fast_download_link = resolutions["Fast Download"]
-    hd_download_link = resolutions["HD Video"]
-    thumbnail_url = data["response"][0]["thumbnail"]
-    video_title = data["response"][0]["title"]
+    resolutions = data["Data"]
+    fast_download_link = resolutions["DirectLink"]
+    hd_download_link = resolutions["DirectLink2"]
+    thumbnail_url = resolutions["Thum"][0]["360x270"]
+    video_title = resolutions["FileName"]
 
     try:
         download = aria2.add_uris([fast_download_link])
