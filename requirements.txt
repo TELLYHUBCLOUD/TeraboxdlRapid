@@ -9,4 +9,7 @@ python-dotenv
 gunicorn
 gevent
 flask
-setuptools-scm<8
+setuptools>=61
+pymediainfo==6.0.1
+
+
