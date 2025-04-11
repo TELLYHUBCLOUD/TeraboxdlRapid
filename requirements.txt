@@ -4,12 +4,9 @@ requests
 aiohttp
 aiofiles
 aria2p
-pyrofork
+git+https://github.com/Hrishi2861/pyrofork-2.2.11-peer-fix.git
 python-dotenv
 gunicorn
 gevent
 flask
-setuptools>=61
-pymediainfo==6.0.1
-
 
