@@ -102,57 +102,81 @@ async def download_video(url, reply_msg, user_mention, user_id):
 
 
 async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message):
-    file_size = os.path.getsize(file_path)
-    uploaded = 0
-    start_time = datetime.now()
-    last_update_time = time.time()
+    try:
+        file_size = os.path.getsize(file_path)
+        uploaded = 0
+        start_time = datetime.now()
+        last_update_time = time.time()
 
-    async def progress(current, total):
-        nonlocal uploaded, last_update_time
-        uploaded = current
-        percentage = (current / total) * 100
-        elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
-        
-        if time.time() - last_update_time > 2:
-            progress_text = format_progress_bar(
-                filename=video_title,
-                percentage=percentage,
-                done=current,
-                total_size=total,
-                status="Uploading",
-                eta=(total - current) / (current / elapsed_time_seconds) if current > 0 else 0,
-                speed=current / elapsed_time_seconds if current > 0 else 0,
-                elapsed=elapsed_time_seconds,
-                user_mention=user_mention,
-                user_id=user_id,
-                aria2p_gid=""
+        # This will be used for progress updates during the video upload
+        async def progress(current, total):
+            nonlocal uploaded, last_update_time
+            uploaded = current
+            percentage = (current / total) * 100
+            elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
+
+            # Update progress text every 2 seconds
+            if time.time() - last_update_time > 2:
+                progress_text = format_progress_bar(
+                    filename=video_title,
+                    percentage=percentage,
+                    done=current,
+                    total_size=total,
+                    status="Uploading",
+                    eta=(total - current) / (current / elapsed_time_seconds) if current > 0 else 0,
+                    speed=current / elapsed_time_seconds if current > 0 else 0,
+                    elapsed=elapsed_time_seconds,
+                    user_mention=user_mention,
+                    user_id=user_id,
+                    aria2p_gid=""  # No need to provide GID during upload
+                )
+                try:
+                    await reply_msg.edit_text(progress_text)
+                    last_update_time = time.time()
+                except Exception as e:
+                    logging.warning(f"Error updating progress message: {e}")
+
+        # Upload video with the provided progress function
+        with open(file_path, 'rb') as file:
+            collection_message = await client.send_video(
+                chat_id=collection_channel_id,
+                video=file,
+                caption=f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ : {user_mention}\n📥 ᴜsᴇʀ ʟɪɴᴋ: tg://user?id={user_id}",
+                thumb=thumbnail_path,
+                progress=progress
             )
-            try:
-                await reply_msg.edit_text(progress_text)
-                last_update_time = time.time()
-            except Exception as e:
-                logging.warning(f"Error updating progress message: {e}")
 
-    with open(file_path, 'rb') as file:
-        collection_message = await client.send_video(
-            chat_id=collection_channel_id,
-            video=file,
-            caption=f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ : {user_mention}\n📥 ᴜsᴇʀ ʟɪɴᴋ: tg://user?id={user_id}",
-            thumb=thumbnail_path,
-            progress=progress
-        )
-        await client.copy_message(
-            chat_id=message.chat.id,
-            from_chat_id=collection_channel_id,
-            message_id=collection_message.id
-        )
-        await asyncio.sleep(1)
-        await message.delete()
+            # After uploading, copy the message to the user's chat
+            await client.copy_message(
+                chat_id=message.chat.id,
+                from_chat_id=collection_channel_id,
+                message_id=collection_message.id
+            )
 
-    await reply_msg.delete()
-    sticker_message = await message.reply_sticker("CAACAgIAAxkBAAEZdwRmJhCNfFRnXwR_lVKU1L9F3qzbtAAC4gUAAj-VzApzZV-v3phk4DQE")
-    os.remove(file_path)
-    os.remove(thumbnail_path)
-    await asyncio.sleep(5)
-    await sticker_message.delete()
-    return collection_message.id
+            # Delete the original message after upload
+            await asyncio.sleep(1)
+            await message.delete()
+
+        # After everything is done, delete the reply message and send a sticker
+        await reply_msg.delete()
+        sticker_message = await message.reply_sticker("CAACAgIAAxkBAAEZdwRmJhCNfFRnXwR_lVKU1L9F3qzbtAAC4gUAAj-VzApzZV-v3phk4DQE")
+
+        # Clean up files only after successful upload
+        os.remove(file_path)
+        os.remove(thumbnail_path)
+
+        # Delay before deleting the sticker message
+        await asyncio.sleep(5)
+        await sticker_message.delete()
+
+        return collection_message.id
+
+    except Exception as e:
+        logging.error(f"Error uploading video: {e}")
+        # Handle cleanup and error messaging
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if os.path.exists(thumbnail_path):
+            os.remove(thumbnail_path)
+        await reply_msg.edit_text("❌ Failed to upload video. Please try again later.")
+        return None
