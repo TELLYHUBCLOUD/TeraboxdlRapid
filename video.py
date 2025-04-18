@@ -24,17 +24,22 @@ aria2.set_global_options(options)
 
 
 async def download_video(url, reply_msg, user_mention, user_id):
-    response = requests.get(f"https://teraboxdl.tellycloudapi.workers.dev/?url={url}")
-    response.raise_for_status()
-    data = response.json()
-
-    resolutions = data["Data"]
-    fast_download_link = resolutions["DirectLink"]
-    hd_download_link = resolutions["DirectLink2"]
-    thumbnail_url = resolutions["Thum"][0]["360x270"]
-    video_title = resolutions["FileName"]
-
     try:
+        # Get video metadata from the API
+        response = requests.get(f"https://teraboxdl.tellycloudapi.workers.dev/?url={url}")
+        response.raise_for_status()
+        data = response.json()
+
+        resolutions = data.get("Data", {})
+        fast_download_link = resolutions.get("DirectLink")
+        hd_download_link = resolutions.get("DirectLink2")
+        thumbnail_url = resolutions.get("Thum", [{}])[0].get("360x270")
+        video_title = resolutions.get("FileName", "video")
+
+        if not fast_download_link:
+            raise ValueError("Fast download link not found in the response.")
+
+        # Start download via aria2
         download = aria2.add_uris([fast_download_link])
         start_time = datetime.now()
 
@@ -46,6 +51,7 @@ async def download_video(url, reply_msg, user_mention, user_id):
             speed = download.download_speed
             eta = download.eta
             elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
+
             progress_text = format_progress_bar(
                 filename=video_title,
                 percentage=percentage,
@@ -65,78 +71,34 @@ async def download_video(url, reply_msg, user_mention, user_id):
         if download.is_complete:
             file_path = download.files[0].path
 
+            # Download thumbnail
             thumbnail_path = "thumbnail.jpg"
-            thumbnail_response = requests.get(thumbnail_url)
-            with open(thumbnail_path, "wb") as thumb_file:
-                thumb_file.write(thumbnail_response.content)
+            if thumbnail_url:
+                thumb_response = requests.get(thumbnail_url)
+                thumb_response.raise_for_status()
+                with open(thumbnail_path, "wb") as thumb_file:
+                    thumb_file.write(thumb_response.content)
+            else:
+                thumbnail_path = None
 
             await reply_msg.edit_text("ᴜᴘʟᴏᴀᴅɪɴɢ...")
-
             return file_path, thumbnail_path, video_title
+
     except Exception as e:
-        logging.error(f"Error handling message: {e}")
-        buttons = [
-            [InlineKeyboardButton("🚀 HD Video", url=hd_download_link)],
-            [InlineKeyboardButton("⚡ Fast Download", url=fast_download_link)]
-        ]
-        reply_markup = InlineKeyboardMarkup(buttons)
+        logging.error(f"Download failed: {e}")
+        buttons = []
+        if hd_download_link:
+            buttons.append([InlineKeyboardButton("🚀 HD Video", url=hd_download_link)])
+        if fast_download_link:
+            buttons.append([InlineKeyboardButton("⚡ Fast Download", url=fast_download_link)])
+
+        reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+
         await reply_msg.reply_text(
-            "Fast Download Link For this Video is Broken, Download manually using the Link Below.",
+            "Fast Download Link for this video is broken. Please download manually using the link below.",
             reply_markup=reply_markup
         )
         return None, None, None
-
-# async def download_video(url, reply_msg, user_mention, user_id):
-#     response = requests.get(f"https://teraboxvideodownloader.nepcoderdevs.workers.dev/?url={url}")
-#     response.raise_for_status()
-#     data = response.json()
-
-#     resolutions = data["response"][0]["resolutions"]
-#     fast_download_link = resolutions["Fast Download"]
-#     hd_download_link = resolutions["HD Video"]
-#     thumbnail_url = data["response"][0]["thumbnail"]
-#     video_title = data["response"][0]["title"]
-
-#     download = aria2.add_uris([fast_download_link])
-#     start_time = datetime.now()
-
-#     while not download.is_complete:
-#         download.update()
-#         percentage = download.progress
-#         done = download.completed_length
-#         total_size = download.total_length
-#         speed = download.download_speed
-#         eta = download.eta
-#         elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
-#         progress_text = format_progress_bar(
-#             filename=video_title,
-#             percentage=percentage,
-#             done=done,
-#             total_size=total_size,
-#             status="Downloading",
-#             eta=eta,
-#             speed=speed,
-#             elapsed=elapsed_time_seconds,
-#             user_mention=user_mention,
-#             user_id=user_id,
-#             aria2p_gid=download.gid
-#         )
-#         await reply_msg.edit_text(progress_text)
-#         await asyncio.sleep(2)
-
-#     if download.is_complete:
-#         file_path = download.files[0].path
-
-#         thumbnail_path = "thumbnail.jpg"
-#         thumbnail_response = requests.get(thumbnail_url)
-#         with open(thumbnail_path, "wb") as thumb_file:
-#             thumb_file.write(thumbnail_response.content)
-
-#         await reply_msg.edit_text("ᴜᴘʟᴏᴀᴅɪɴɢ...")
-
-#         return file_path, thumbnail_path, video_title
-#     else:
-#         return markup
 
 
 async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message):
