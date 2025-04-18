@@ -135,100 +135,118 @@ async def download_video(url, reply_msg, user_mention, user_id):
         return None, None, None
 
 async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message):
-    try:
-        # Validate file existence
-        if not os.path.exists(file_path):
-            raise FileNotFoundError("Downloaded file not found")
-
-        file_size = os.path.getsize(file_path)
-        start_time = datetime.now()
-        last_progress_update = time.time()
-        uploaded = 0
-
-        async def progress(current, total):
-            nonlocal uploaded, last_progress_update
-            uploaded = current
-            now = time.time()
-            
-            if now - last_progress_update > 2:
-                percentage = (current / total) * 100
-                elapsed = (datetime.now() - start_time).total_seconds()
-                speed = current / elapsed if elapsed > 0 else 0
-                eta = (total - current) / speed if speed > 0 else 0
-
-                progress_text = format_progress_bar(
-                    filename=video_title,
-                    percentage=percentage,
-                    done=current,
-                    total_size=total,
-                    status="Uploading",
-                    eta=eta,
-                    speed=speed,
-                    elapsed=elapsed,
-                    user_mention=user_mention,
-                    user_id=user_id
-                )
-                try:
-                    await reply_msg.edit_text(progress_text)
-                    last_progress_update = now
-                except FloodWait as e:
-                    await asyncio.sleep(e.value)
-                except RPCError:
-                    pass
-
-        # Validate thumbnail
-        if not (thumbnail_path and os.path.exists(thumbnail_path)):
-            thumbnail_path = None
-
-        # Upload video
+    max_retries = 3
+    retry_delay = 5
+    attempt = 0
+    
+    while attempt < max_retries:
         try:
+            # Validate file existence and size
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
+                
+            file_size = os.path.getsize(file_path)
+            if file_size > 2 * 1024 * 1024 * 1024:  # 2GB Telegram limit
+                raise ValueError("File size exceeds Telegram's 2GB limit")
+
+            # Validate thumbnail
+            if thumbnail_path and not os.path.exists(thumbnail_path):
+                thumbnail_path = None
+                logging.warning("Thumbnail file not found, proceeding without")
+
+            # Upload progress tracking
+            start_time = datetime.now()
+            last_progress_update = time.time()
+            uploaded = 0
+
+            async def progress(current, total):
+                nonlocal last_progress_update
+                now = time.time()
+                if now - last_progress_update > 2:
+                    try:
+                        progress_text = format_progress_bar(
+                            filename=video_title,
+                            percentage=(current / total) * 100,
+                            done=current,
+                            total_size=total,
+                            status="Uploading",
+                            eta=(total - current) / (current / (now - start_time.timestamp())) if current > 0 else 0,
+                            speed=current / (now - start_time.timestamp()),
+                            elapsed=now - start_time.timestamp(),
+                            user_mention=user_mention,
+                            user_id=user_id
+                        )
+                        await reply_msg.edit_text(progress_text)
+                        last_progress_update = now
+                    except Exception as e:
+                        logging.warning(f"Progress update failed: {str(e)}")
+
+            # Attempt upload
             collection_message = await client.send_video(
                 chat_id=collection_channel_id,
                 video=file_path,
-                caption=f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ : {user_mention}\n📥 ᴜsᴇʀ ʟɪɴᴋ: tg://user?id={user_id}",
+                caption=f"✨ {video_title}\n👤 Leached by: {user_mention}\n📥 User ID: tg://user?id={user_id}",
                 thumb=thumbnail_path,
                 progress=progress,
-                supports_streaming=True
+                supports_streaming=True,
+                parse_mode="markdown"
             )
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-            collection_message = await client.send_video(...)  # Resend with same parameters
 
-        # Copy to user
-        await client.copy_message(
-            chat_id=message.chat.id,
-            from_chat_id=collection_channel_id,
-            message_id=collection_message.id
-        )
+            # Copy to user and cleanup
+            await client.copy_message(
+                chat_id=message.chat.id,
+                from_chat_id=collection_channel_id,
+                message_id=collection_message.id
+            )
 
-        # Cleanup
-        try:
+            # Post-upload cleanup
             await message.delete()
             await reply_msg.delete()
+            
+            # Send confirmation sticker
             sticker = await message.reply_sticker("CAACAgIAAxkBAAEZdwRmJhCNfFRnXwR_lVKU1L9F3qzbtAAC4gUAAj-VzApzZV-v3phk4DQE")
             await asyncio.sleep(5)
             await sticker.delete()
-        except RPCError:
-            pass
 
-        return collection_message.id
+            return collection_message.id
 
-    except Exception as e:
-        logging.error(f"Upload failed: {str(e)}", exc_info=True)
-        error_msg = "❌ Upload failed. Please try again later."
-        
-        try:
+        except FloodWait as e:
+            logging.warning(f"Flood wait required: {e.value} seconds")
+            await reply_msg.edit_text(f"⏳ Too many requests! Waiting {e.value} seconds before retrying...")
+            await asyncio.sleep(e.value)
+            attempt += 1
+            continue
+
+        except (RPCError, IOError) as e:
+            logging.error(f"Upload error (attempt {attempt + 1}): {str(e)}")
+            attempt += 1
+            if attempt < max_retries:
+                await reply_msg.edit_text(f"⚠️ Upload failed! Retrying {attempt}/{max_retries} in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
+            continue
+
+        except Exception as e:
+            error_msg = f"❌ Critical upload error: {str(e)}"
+            logging.error(error_msg)
+            
+            # Provide specific error messages for common issues
+            if "File too large" in str(e):
+                error_msg = "📁 File size exceeds Telegram's 2GB limit!"
+            elif "Invalid file format" in str(e):
+                error_msg = "🎞️ Invalid video format detected!"
+            elif "invalid chat_id" in str(e):
+                error_msg = "🔒 Bot doesn't have permission to upload to this channel!"
+                
             await reply_msg.edit_text(error_msg)
-        except RPCError:
-            pass
+            break
 
-        return None
-    finally:
-        # Ensure cleanup of files
-        try:
-            if file_path and os.path.exists(file_path):
-                os.remove(file_path)
-            if thumbnail_path and os.path.exists(thumbnail_path):
-                os.remove(thumbnail_path)
-        except Exception as cleanup_err:
-            logging.error(f"File cleanup failed: {cleanup_err}")
+    # Final cleanup attempt
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            os.remove(thumbnail_path)
+    except Exception as cleanup_error:
+        logging.error(f"Cleanup failed: {str(cleanup_error)}")
+
+    return None
