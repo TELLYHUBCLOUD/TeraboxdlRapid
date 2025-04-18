@@ -19,19 +19,15 @@ options = {
     "max-tries": "50",
     "retry-wait": "3",
     "continue": "true",
-    "dir": "/tmp/terabox_downloads"  # Add dedicated download directory
+    "dir": "/tmp/terabox_downloads"
 }
-
 aria2.set_global_options(options)
-
-# Create download directory if not exists
 os.makedirs(options["dir"], exist_ok=True)
 
 async def download_video(url, reply_msg, user_mention, user_id):
     download = None
     thumbnail_path = None
     try:
-        # Get video metadata from the API
         response = requests.get(f"https://teraboxdl.tellycloudapi.workers.dev/?url={url}", timeout=10)
         response.raise_for_status()
         data = response.json()
@@ -40,33 +36,28 @@ async def download_video(url, reply_msg, user_mention, user_id):
             raise ValueError("Invalid API response format")
 
         resolutions = data["Data"]
-        fast_download_link = resolutions.get("DirectLink")
-        hd_download_link = resolutions.get("DirectLink2")
-        thumbnail_url = (resolutions.get("Thum") or [{}])[0].get("360x270")  # Handle empty Thum list
-        video_title = resolutions.get("FileName", "video").replace("/", "_")  # Sanitize filename
+        fast_link = resolutions.get("DirectLink")
+        hd_link = resolutions.get("DirectLink2")
+        thumbnail_url = (resolutions.get("Thum") or [{}])[0].get("360x270")
+        video_title = resolutions.get("FileName", "video").replace("/", "_")
 
-        if not fast_download_link:
-            if hd_download_link:
-                fast_download_link = hd_download_link
-            else:
-                raise ValueError("No valid download links found")
+        if not fast_link and not hd_link:
+            raise ValueError("No valid download links found")
 
-        # Start download via aria2
-        download = aria2.add_uris([fast_download_link], options={"dir": options["dir"]})
+        download_url = fast_link or hd_link
+        download = aria2.add_uris([download_url], options={"dir": options["dir"]})
         start_time = datetime.now()
         last_update = time.time()
 
         while not download.is_complete:
             await asyncio.sleep(2)
             download.update()
-            
+
             if download.status == "error":
                 raise aria2p.ClientException(f"Download error: {download.error_message}")
-                
             if download.is_paused:
                 raise aria2p.ClientException("Download was paused unexpectedly")
 
-            # Throttle progress updates to avoid flooding
             if time.time() - last_update > 2:
                 progress_text = format_progress_bar(
                     filename=video_title,
@@ -89,164 +80,135 @@ async def download_video(url, reply_msg, user_mention, user_id):
                 except RPCError:
                     pass
 
-        # Verify downloaded file
-        if not download.is_complete or not os.path.exists(download.files[0].path):
+        if not os.path.exists(download.files[0].path):
             raise FileNotFoundError("Downloaded file not found")
 
-        # Download thumbnail
-        thumbnail_path = os.path.join(options["dir"], "thumbnail.jpg")
         if thumbnail_url:
             try:
                 thumb_response = requests.get(thumbnail_url, timeout=10)
                 thumb_response.raise_for_status()
-                with open(thumbnail_path, "wb") as thumb_file:
-                    thumb_file.write(thumb_response.content)
-            except Exception as thumb_err:
-                logging.warning(f"Thumbnail download failed: {thumb_err}")
+                thumbnail_path = os.path.join(options["dir"], "thumbnail.jpg")
+                with open(thumbnail_path, "wb") as f:
+                    f.write(thumb_response.content)
+            except Exception as e:
+                logging.warning(f"Thumbnail download failed: {e}")
                 thumbnail_path = None
 
         return download.files[0].path, thumbnail_path, video_title
 
     except Exception as e:
         logging.error(f"Download failed: {str(e)}", exc_info=True)
-        
-        # Cleanup failed download
         if download and not download.is_removed:
             try:
                 download.remove(force=True, files=True)
-            except Exception as cleanup_err:
-                logging.error(f"Cleanup failed: {cleanup_err}")
+            except Exception as ce:
+                logging.error(f"Cleanup failed: {ce}")
 
-        # Prepare fallback links
         buttons = []
-        if hd_download_link:
-            buttons.append([InlineKeyboardButton("🚀 HD Video", url=hd_download_link)])
-        if fast_download_link and fast_download_link != hd_download_link:
-            buttons.append([InlineKeyboardButton("⚡ Fast Download", url=fast_download_link)])
+        if hd_link:
+            buttons.append([InlineKeyboardButton("🚀 HD Video", url=hd_link)])
+        if fast_link and fast_link != hd_link:
+            buttons.append([InlineKeyboardButton("⚡ Fast Download", url=fast_link)])
 
-        reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
-        error_msg = "❌ Download failed. Please try again or use manual links below."
-
+        markup = InlineKeyboardMarkup(buttons) if buttons else None
         try:
-            await reply_msg.edit_text(error_msg, reply_markup=reply_markup)
+            await reply_msg.edit_text("❌ Download failed. Please try again or use manual links below.", reply_markup=markup)
         except RPCError:
             pass
 
         return None, None, None
 
 async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message):
-    max_retries = 3
-    retry_delay = 5
-    attempt = 0
-    
-    while attempt < max_retries:
+    try:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError("Downloaded file not found")
+
+        file_size = os.path.getsize(file_path)
+        start_time = datetime.now()
+        last_update = time.time()
+
+        async def progress(current, total):
+            nonlocal last_update
+            now = time.time()
+            if now - last_update > 2:
+                percent = (current / total) * 100
+                elapsed = (datetime.now() - start_time).total_seconds()
+                speed = current / elapsed if elapsed else 0
+                eta = (total - current) / speed if speed else 0
+
+                progress_text = format_progress_bar(
+                    filename=video_title,
+                    percentage=percent,
+                    done=current,
+                    total_size=total,
+                    status="Uploading",
+                    eta=eta,
+                    speed=speed,
+                    elapsed=elapsed,
+                    user_mention=user_mention,
+                    user_id=user_id
+                )
+                try:
+                    await reply_msg.edit_text(progress_text)
+                    last_update = now
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
+                except RPCError:
+                    pass
+
+        if not (thumbnail_path and os.path.exists(thumbnail_path)):
+            thumbnail_path = None
+
         try:
-            # Validate file existence and size
-            if not os.path.exists(file_path):
-                raise FileNotFoundError(f"File not found: {file_path}")
-                
-            file_size = os.path.getsize(file_path)
-            if file_size > 2 * 1024 * 1024 * 1024:  # 2GB Telegram limit
-                raise ValueError("File size exceeds Telegram's 2GB limit")
-
-            # Validate thumbnail
-            if thumbnail_path and not os.path.exists(thumbnail_path):
-                thumbnail_path = None
-                logging.warning("Thumbnail file not found, proceeding without")
-
-            # Upload progress tracking
-            start_time = datetime.now()
-            last_progress_update = time.time()
-            uploaded = 0
-
-            async def progress(current, total):
-                nonlocal last_progress_update
-                now = time.time()
-                if now - last_progress_update > 2:
-                    try:
-                        progress_text = format_progress_bar(
-                            filename=video_title,
-                            percentage=(current / total) * 100,
-                            done=current,
-                            total_size=total,
-                            status="Uploading",
-                            eta=(total - current) / (current / (now - start_time.timestamp())) if current > 0 else 0,
-                            speed=current / (now - start_time.timestamp()),
-                            elapsed=now - start_time.timestamp(),
-                            user_mention=user_mention,
-                            user_id=user_id
-                        )
-                        await reply_msg.edit_text(progress_text)
-                        last_progress_update = now
-                    except Exception as e:
-                        logging.warning(f"Progress update failed: {str(e)}")
-
-            # Attempt upload
-            collection_message = await client.send_video(
+            collection_msg = await client.send_video(
                 chat_id=collection_channel_id,
                 video=file_path,
-                caption=f"✨ {video_title}\n👤 Leached by: {user_mention}\n📥 User ID: tg://user?id={user_id}",
+                caption=f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ : {user_mention}\n📥 ᴜsᴇʀ ʟɪɴᴋ: tg://user?id={user_id}",
                 thumb=thumbnail_path,
                 progress=progress,
-                supports_streaming=True,
-                parse_mode="markdown"
+                supports_streaming=True
+            )
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            collection_msg = await client.send_video(
+                chat_id=collection_channel_id,
+                video=file_path,
+                caption=f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ : {user_mention}\n📥 ᴜsᴇʀ ʟɪɴᴋ: tg://user?id={user_id}",
+                thumb=thumbnail_path,
+                progress=progress,
+                supports_streaming=True
             )
 
-            # Copy to user and cleanup
-            await client.copy_message(
-                chat_id=message.chat.id,
-                from_chat_id=collection_channel_id,
-                message_id=collection_message.id
-            )
+        await client.copy_message(
+            chat_id=message.chat.id,
+            from_chat_id=collection_channel_id,
+            message_id=collection_msg.id
+        )
 
-            # Post-upload cleanup
+        try:
             await message.delete()
             await reply_msg.delete()
-            
-            # Send confirmation sticker
             sticker = await message.reply_sticker("CAACAgIAAxkBAAEZdwRmJhCNfFRnXwR_lVKU1L9F3qzbtAAC4gUAAj-VzApzZV-v3phk4DQE")
             await asyncio.sleep(5)
             await sticker.delete()
+        except RPCError:
+            pass
 
-            return collection_message.id
+        return collection_msg.id
 
-        except FloodWait as e:
-            logging.warning(f"Flood wait required: {e.value} seconds")
-            await reply_msg.edit_text(f"⏳ Too many requests! Waiting {e.value} seconds before retrying...")
-            await asyncio.sleep(e.value)
-            attempt += 1
-            continue
+    except Exception as e:
+        logging.error(f"Upload failed: {str(e)}", exc_info=True)
+        try:
+            await reply_msg.edit_text("❌ Upload failed. Please try again later.")
+        except RPCError:
+            pass
+        return None
 
-        except (RPCError, IOError) as e:
-            logging.error(f"Upload error (attempt {attempt + 1}): {str(e)}")
-            attempt += 1
-            if attempt < max_retries:
-                await reply_msg.edit_text(f"⚠️ Upload failed! Retrying {attempt}/{max_retries} in {retry_delay}s...")
-                await asyncio.sleep(retry_delay)
-            continue
-
-        except Exception as e:
-            error_msg = f"❌ Critical upload error: {str(e)}"
-            logging.error(error_msg)
-            
-            # Provide specific error messages for common issues
-            if "File too large" in str(e):
-                error_msg = "📁 File size exceeds Telegram's 2GB limit!"
-            elif "Invalid file format" in str(e):
-                error_msg = "🎞️ Invalid video format detected!"
-            elif "invalid chat_id" in str(e):
-                error_msg = "🔒 Bot doesn't have permission to upload to this channel!"
-                
-            await reply_msg.edit_text(error_msg)
-            break
-
-    # Final cleanup attempt
-    try:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        if thumbnail_path and os.path.exists(thumbnail_path):
-            os.remove(thumbnail_path)
-    except Exception as cleanup_error:
-        logging.error(f"Cleanup failed: {str(cleanup_error)}")
-
-    return None
+    finally:
+        try:
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                os.remove(thumbnail_path)
+        except Exception as cleanup_err:
+            logging.error(f"File cleanup failed: {cleanup_err}")
