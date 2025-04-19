@@ -33,7 +33,7 @@ async def download_video(url, reply_msg, user_mention, user_id):
 
     try:
         # Fetch metadata from API
-        response = requests.get(f"https://teraboxdl.tellycloudapi.workers.dev/?url={url}", timeout=10)
+        response = requests.get(f"http/?url={url}", timeout=10)
         response.raise_for_status()
         data = response.json()
 
